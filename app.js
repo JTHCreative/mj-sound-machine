@@ -246,7 +246,9 @@ const PADS = [
 
 const LOCAL_SAMPLES_KEY = "mj-sound-machine:samples:v1";
 const LOCAL_LABELS_KEY = "mj-sound-machine:labels:v1";
+const LOCAL_ORDER_KEY = "mj-sound-machine:order:v1";
 const HOLD_RESET_MS = 5000;
+const DRAG_THRESHOLD_PX = 8;
 const localSamples = loadLocalJSON(LOCAL_SAMPLES_KEY); // id -> dataURL
 const localLabels = loadLocalJSON(LOCAL_LABELS_KEY); // id -> label
 const decoded = new Map(); // id -> { key, buffer }  (key invalidates on change)
@@ -372,6 +374,40 @@ function promptRename(currentLabel) {
   return trimmed.slice(0, 40);
 }
 
+function sanitizeOrder(order, defaults) {
+  const valid = new Set(defaults);
+  const seen = new Set();
+  const out = [];
+  if (Array.isArray(order)) {
+    for (const id of order) {
+      if (valid.has(id) && !seen.has(id)) {
+        out.push(id);
+        seen.add(id);
+      }
+    }
+  }
+  for (const id of defaults) {
+    if (!seen.has(id)) out.push(id);
+  }
+  return out;
+}
+
+function applyOrderToGrid(grid, order, padsById) {
+  order.forEach((id) => {
+    const btn = padsById.get(id);
+    if (btn) grid.appendChild(btn);
+  });
+}
+
+function swapInOrder(order, aId, bId) {
+  const next = order.slice();
+  const ai = next.indexOf(aId);
+  const bi = next.indexOf(bId);
+  if (ai < 0 || bi < 0 || ai === bi) return next;
+  [next[ai], next[bi]] = [next[bi], next[ai]];
+  return next;
+}
+
 async function triggerPad(def, btn, remoteSamples) {
   const ctx = getCtx();
   const master = ctx.createGain();
@@ -420,10 +456,17 @@ async function loadFirebaseModules() {
 
 // ---- App wiring ----------------------------------------------------------
 
-function initLocalOnlyMode(padRefs) {
+function initLocalOnlyMode(ctx) {
+  const { padRefs, grid, padsById, defaultOrder } = ctx;
   const hint = document.getElementById("storage-hint");
   hint.textContent =
     "Running in local-only mode — drag-dropped sounds are saved to this browser only. Add your Firebase config to enable cloud sharing.";
+
+  let currentOrder = sanitizeOrder(
+    loadLocalJSON(LOCAL_ORDER_KEY),
+    defaultOrder,
+  );
+  applyOrderToGrid(grid, currentOrder, padsById);
 
   function resetLocal(def, btn) {
     delete localSamples[def.id];
@@ -442,6 +485,12 @@ function initLocalOnlyMode(padRefs) {
     localLabels[def.id] = next;
     saveLocalLabels();
     setPadLabel(btn, next);
+  }
+
+  function reorderLocal(aId, bId) {
+    currentOrder = swapInOrder(currentOrder, aId, bId);
+    saveLocalJSON(LOCAL_ORDER_KEY, currentOrder);
+    applyOrderToGrid(grid, currentOrder, padsById);
   }
 
   padRefs.forEach(({ def, btn }) => {
@@ -471,11 +520,13 @@ function initLocalOnlyMode(padRefs) {
     getRemoteSamples: () => ({}),
     resetPad: resetLocal,
     renamePad: renameLocal,
+    reorderPads: reorderLocal,
     canEdit: () => true,
   };
 }
 
-async function initFirebaseMode(padRefs) {
+async function initFirebaseMode(ctx) {
+  const { padRefs, grid, padsById, defaultOrder } = ctx;
   const hint = document.getElementById("storage-hint");
   const authBar = document.getElementById("auth-bar");
   const authStatus = document.getElementById("auth-status");
@@ -491,7 +542,7 @@ async function initFirebaseMode(padRefs) {
       "Could not load Firebase SDK — falling back to local-only mode.";
     hint.classList.add("error");
     authBar.hidden = true;
-    return initLocalOnlyMode(padRefs);
+    return initLocalOnlyMode(ctx);
   }
 
   const { initializeApp } = modules.app;
@@ -517,9 +568,12 @@ async function initFirebaseMode(padRefs) {
   const db = getFirestore(fbApp);
   const provider = new GoogleAuthProvider();
   const padsCol = collection(db, PADS_COLLECTION);
+  const orderDoc = doc(db, "meta", "order");
 
   let remoteSamples = {}; // id -> { source: dataUrl, key }
   let currentUser = null;
+  let currentOrder = defaultOrder.slice();
+  applyOrderToGrid(grid, currentOrder, padsById);
 
   function isOwner(user) {
     if (!user) return false;
@@ -670,6 +724,39 @@ async function initFirebaseMode(padRefs) {
     }
   }
 
+  async function reorderPads(aId, bId) {
+    if (!isOwner(currentUser)) return;
+    const next = swapInOrder(currentOrder, aId, bId);
+    try {
+      await setDoc(
+        orderDoc,
+        {
+          sequence: next,
+          updatedAt: serverTimestamp(),
+          updatedBy: currentUser.uid,
+        },
+        { merge: true },
+      );
+    } catch (err) {
+      console.error(err);
+      hint.textContent = `Reorder failed: ${err.message}`;
+      hint.classList.add("error");
+    }
+  }
+
+  onSnapshot(
+    orderDoc,
+    (snap) => {
+      const data = snap.exists() ? snap.data() : null;
+      const seq = data && Array.isArray(data.sequence) ? data.sequence : null;
+      currentOrder = sanitizeOrder(seq, defaultOrder);
+      applyOrderToGrid(grid, currentOrder, padsById);
+    },
+    (err) => {
+      console.warn("Order subscription failed:", err);
+    },
+  );
+
   async function renamePad(def, btn) {
     if (!isOwner(currentUser)) {
       hint.textContent = "Sign in as the owner to rename pads.";
@@ -722,6 +809,7 @@ async function initFirebaseMode(padRefs) {
     getRemoteSamples: () => remoteSamples,
     resetPad,
     renamePad,
+    reorderPads,
     canEdit: () => isOwner(currentUser),
   };
 }
@@ -733,19 +821,23 @@ function init() {
     grid.appendChild(btn);
     return { def, btn };
   });
+  const padsById = new Map(padRefs.map(({ def, btn }) => [def.id, btn]));
+  const defaultOrder = PADS.map((p) => p.id);
   const byKey = new Map();
   padRefs.forEach(({ def, btn }, i) => {
     if (KEYS[i]) byKey.set(KEYS[i], { def, btn });
   });
 
+  const ctx = { padRefs, grid, padsById, defaultOrder };
   const mode = isConfigured
-    ? initFirebaseMode(padRefs)
-    : Promise.resolve(initLocalOnlyMode(padRefs));
+    ? initFirebaseMode(ctx)
+    : Promise.resolve(initLocalOnlyMode(ctx));
 
   let api = {
     getRemoteSamples: () => ({}),
     resetPad: () => {},
     renamePad: () => {},
+    reorderPads: () => {},
     canEdit: () => false,
   };
   Promise.resolve(mode).then((resolved) => {
@@ -753,6 +845,48 @@ function init() {
   });
 
   const lastPointerType = new WeakMap(); // btn -> "mouse" | "touch" | "pen"
+  let drag = null; // { def, btn, startX, startY, pointerId, dragging, target }
+
+  function onDragMove(ev) {
+    if (!drag || ev.pointerId !== drag.pointerId) return;
+    const dx = ev.clientX - drag.startX;
+    const dy = ev.clientY - drag.startY;
+    if (!drag.dragging) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      drag.dragging = true;
+      cancelHold(drag.btn);
+      drag.btn.classList.add("dragging");
+    }
+    drag.btn.style.transform = `translate(${dx}px, ${dy}px) scale(1.05)`;
+    drag.btn.style.pointerEvents = "none";
+    const elem = document.elementFromPoint(ev.clientX, ev.clientY);
+    drag.btn.style.pointerEvents = "";
+    const targetPad =
+      elem && elem !== drag.btn ? elem.closest(".pad") : null;
+    const newTarget = targetPad && targetPad !== drag.btn ? targetPad : null;
+    if (newTarget !== drag.target) {
+      if (drag.target) drag.target.classList.remove("drop-target");
+      if (newTarget) newTarget.classList.add("drop-target");
+      drag.target = newTarget;
+    }
+  }
+
+  function onDragEnd(ev) {
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragEnd);
+    if (!drag) return;
+    const { btn, target, def, dragging } = drag;
+    if (dragging) {
+      btn.classList.remove("dragging");
+      btn.style.transform = "";
+      if (target) target.classList.remove("drop-target");
+      if (target && target.dataset.id && target.dataset.id !== def.id) {
+        api.reorderPads(def.id, target.dataset.id);
+      }
+    }
+    drag = null;
+  }
 
   padRefs.forEach(({ def, btn }) => {
     const editBtn = btn.querySelector(".edit-btn");
@@ -761,14 +895,27 @@ function init() {
       ev.preventDefault();
       lastPointerType.set(btn, ev.pointerType || "mouse");
       triggerPad(def, btn, api.getRemoteSamples());
-      if (api.canEdit()) {
-        startHold(btn, () => api.resetPad(def, btn));
-      }
+      if (!api.canEdit()) return;
+      startHold(btn, () => api.resetPad(def, btn));
+      drag = {
+        def,
+        btn,
+        startX: ev.clientX,
+        startY: ev.clientY,
+        pointerId: ev.pointerId,
+        dragging: false,
+        target: null,
+      };
+      window.addEventListener("pointermove", onDragMove);
+      window.addEventListener("pointerup", onDragEnd);
+      window.addEventListener("pointercancel", onDragEnd);
     });
-    const stopHold = () => cancelHold(btn);
-    btn.addEventListener("pointerup", stopHold);
-    btn.addEventListener("pointerleave", stopHold);
-    btn.addEventListener("pointercancel", stopHold);
+    const stopHoldIfNotDragging = () => {
+      if (!drag || !drag.dragging) cancelHold(btn);
+    };
+    btn.addEventListener("pointerup", stopHoldIfNotDragging);
+    btn.addEventListener("pointerleave", stopHoldIfNotDragging);
+    btn.addEventListener("pointercancel", stopHoldIfNotDragging);
 
     // Desktop-only right-click rename. On touch, browsers fire contextmenu
     // from long-press, which would collide with hold-to-reset.
