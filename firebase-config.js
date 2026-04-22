@@ -31,6 +31,6 @@ export const firebaseConfig = {
 // Set to your Firebase Auth UID. Only this user will be able to upload
 // sounds. If left empty, any authenticated user can upload (useful for
 // testing before you lock it down).
-export const ownerUid = "";
+export const ownerUid = "UYBIT9WXAORu2udX5hpcHMgUii32";
 
 export const isConfigured = Boolean(firebaseConfig.apiKey);
