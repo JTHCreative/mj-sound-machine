@@ -138,6 +138,20 @@ main {
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   overflow: hidden;
+  touch-action: none;
+}
+
+.pad.dragging {
+  transition: none;
+  z-index: 20;
+  box-shadow: 0 16px 40px -10px rgba(0, 0, 0, 0.6),
+    0 0 0 2px var(--accent);
+  opacity: 0.95;
+}
+
+.pad.drop-target {
+  border-color: var(--accent-2);
+  box-shadow: inset 0 0 0 2px var(--accent-2);
 }
 
 .pad:hover {
@@ -221,6 +235,40 @@ main {
   pointer-events: none;
   border-bottom-left-radius: inherit;
   border-bottom-right-radius: inherit;
+}
+
+.pad .edit-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease,
+    transform 120ms ease;
+  z-index: 1;
+}
+
+.pad .edit-btn:hover {
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.55);
+  transform: scale(1.05);
+}
+
+.pad .edit-btn svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.pad.can-edit .edit-btn {
+  display: flex;
 }
 
 .pad.holding .hold-progress {

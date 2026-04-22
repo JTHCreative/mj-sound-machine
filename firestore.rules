@@ -8,5 +8,10 @@ service cloud.firestore {
       allow write: if request.auth != null
                    && request.auth.uid == "UYBIT9WXAORu2udX5hpcHMgUii32";
     }
+    match /meta/{docId} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.auth.uid == "UYBIT9WXAORu2udX5hpcHMgUii32";
+    }
   }
 }
