@@ -20,12 +20,12 @@
 // drag-dropped sounds to this browser's localStorage.
 
 export const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: "",
+  apiKey: "AIzaSyDsH8aRU5Dy_tGEJm__KfoorZ23EOFI5DA",
+  authDomain: "mj-sound-effects.firebaseapp.com",
+  projectId: "mj-sound-effects",
+  storageBucket: "mj-sound-effects.firebasestorage.app",
+  messagingSenderId: "467502079855",
+  appId: "1:467502079855:web:ab21204d29ede4b982929a",
 };
 
 // Set to your Firebase Auth UID. Only this user will be able to upload
