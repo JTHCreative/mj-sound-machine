@@ -1,23 +1,16 @@
 // MJ Sound Machine — a grid of pads that play short synthesized sounds.
-// Each pad can be replaced by dropping an audio file onto it; the file is
-// stored in localStorage (as base64) so it persists across reloads.
+// When Firebase is configured, the owner can upload audio to Cloud Storage
+// and all visitors hear the uploaded clips. Otherwise the app falls back to
+// saving drag-dropped files in localStorage for the current browser only.
+
+import { firebaseConfig, ownerUid, isConfigured } from "./firebase-config.js";
+
+const FIREBASE_VERSION = "10.12.0";
+const PAD_DOC_PATH = ["soundboard", "pads"]; // collection, doc
 
 const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
 
-const PADS = [
-  { id: "hee", label: "Hee-hee!", synth: heeHee },
-  { id: "shamone", label: "Shamone!", synth: shamone },
-  { id: "ow", label: "Ow!", synth: ow },
-  { id: "woo", label: "Woo!", synth: woo },
-  { id: "snap", label: "Finger Snap", synth: snap },
-  { id: "kick", label: "Kick", synth: kick },
-  { id: "snare", label: "Snare", synth: snare },
-  { id: "hat", label: "Hi-Hat", synth: hat },
-  { id: "bass", label: "Bass Stab", synth: bassStab },
-  { id: "whoosh", label: "Moonwalk", synth: whoosh },
-  { id: "creak", label: "Thriller Creak", synth: creak },
-  { id: "chime", label: "Billie Chime", synth: chime },
-];
+// ---- Web Audio plumbing -------------------------------------------------
 
 let audioCtx = null;
 function getCtx() {
@@ -28,8 +21,6 @@ function getCtx() {
   if (audioCtx.state === "suspended") audioCtx.resume();
   return audioCtx;
 }
-
-// ---- Synth helpers -------------------------------------------------------
 
 function envGain(ctx, { attack = 0.005, release = 0.2, peak = 0.8 } = {}) {
   const g = ctx.createGain();
@@ -52,12 +43,10 @@ function connect(nodes, destination) {
   nodes[nodes.length - 1].connect(destination);
 }
 
-// ---- The 12 synth voices -------------------------------------------------
+// ---- Synth voices --------------------------------------------------------
 
 function heeHee(ctx, out) {
-  // Quick two-note vocal-ish chirp
-  const notes = [880, 1320];
-  notes.forEach((freq, i) => {
+  [880, 1320].forEach((freq, i) => {
     const osc = ctx.createOscillator();
     osc.type = "triangle";
     const g = envGain(ctx, { attack: 0.01, release: 0.12, peak: 0.35 });
@@ -77,7 +66,6 @@ function heeHee(ctx, out) {
 }
 
 function shamone(ctx, out) {
-  // Syllable-ish pulse pair, low-mid then higher
   [260, 420].forEach((freq, i) => {
     const osc = ctx.createOscillator();
     osc.type = "sawtooth";
@@ -211,7 +199,6 @@ function creak(ctx, out) {
   const g = envGain(ctx, { attack: 0.03, release: 0.7, peak: 0.25 });
   osc.frequency.setValueAtTime(110, ctx.currentTime);
   osc.frequency.linearRampToValueAtTime(175, ctx.currentTime + 0.7);
-  // Slow amplitude wobble for creaky feel
   const lfo = ctx.createOscillator();
   lfo.frequency.value = 11;
   const lfoGain = ctx.createGain();
@@ -225,7 +212,6 @@ function creak(ctx, out) {
 }
 
 function chime(ctx, out) {
-  // A bright two-note bell pattern reminiscent of the Billie Jean intro line
   [466.16, 392.0].forEach((freq, i) => {
     const osc = ctx.createOscillator();
     osc.type = "sine";
@@ -237,47 +223,70 @@ function chime(ctx, out) {
   });
 }
 
-// ---- Persistence for user-supplied samples ------------------------------
+const PADS = [
+  { id: "hee", label: "Hee-hee!", synth: heeHee },
+  { id: "shamone", label: "Shamone!", synth: shamone },
+  { id: "ow", label: "Ow!", synth: ow },
+  { id: "woo", label: "Woo!", synth: woo },
+  { id: "snap", label: "Finger Snap", synth: snap },
+  { id: "kick", label: "Kick", synth: kick },
+  { id: "snare", label: "Snare", synth: snare },
+  { id: "hat", label: "Hi-Hat", synth: hat },
+  { id: "bass", label: "Bass Stab", synth: bassStab },
+  { id: "whoosh", label: "Moonwalk", synth: whoosh },
+  { id: "creak", label: "Thriller Creak", synth: creak },
+  { id: "chime", label: "Billie Chime", synth: chime },
+];
 
-const STORAGE_KEY = "mj-sound-machine:samples:v1";
+// ---- Sample cache --------------------------------------------------------
 
-function loadCustomSamples() {
+const LOCAL_KEY = "mj-sound-machine:samples:v1";
+const localSamples = loadLocalSamples(); // id -> dataURL (fallback mode only)
+const decoded = new Map(); // id -> { key, buffer }  (key invalidates on change)
+const pendingDecodes = new Map(); // id -> Promise
+
+function loadLocalSamples() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}");
   } catch {
     return {};
   }
 }
 
-function saveCustomSamples(map) {
+function saveLocalSamples() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(localSamples));
   } catch (err) {
-    console.warn("Could not persist sample (likely too large):", err);
+    console.warn("Could not persist sample to localStorage:", err);
   }
 }
 
-const customSamples = loadCustomSamples(); // id -> dataURL
-const decoded = {}; // id -> AudioBuffer
-
-async function decodeFromDataURL(dataURL) {
+async function decodeFromSource(source) {
   const ctx = getCtx();
-  const res = await fetch(dataURL);
+  const res = await fetch(source);
   const buf = await res.arrayBuffer();
   return await ctx.decodeAudioData(buf);
 }
 
-async function ensureDecoded(id) {
-  if (decoded[id]) return decoded[id];
-  const dataURL = customSamples[id];
-  if (!dataURL) return null;
-  try {
-    decoded[id] = await decodeFromDataURL(dataURL);
-    return decoded[id];
-  } catch (err) {
-    console.warn("Could not decode stored sample for", id, err);
-    return null;
-  }
+function ensureDecoded(id, source, key) {
+  const cached = decoded.get(id);
+  if (cached && cached.key === key) return Promise.resolve(cached.buffer);
+  const pending = pendingDecodes.get(id);
+  if (pending && pending.key === key) return pending.promise;
+
+  const promise = decodeFromSource(source)
+    .then((buffer) => {
+      decoded.set(id, { key, buffer });
+      pendingDecodes.delete(id);
+      return buffer;
+    })
+    .catch((err) => {
+      pendingDecodes.delete(id);
+      console.warn("Could not decode sample for", id, err);
+      return null;
+    });
+  pendingDecodes.set(id, { key, promise });
+  return promise;
 }
 
 function playBuffer(ctx, out, buffer) {
@@ -287,7 +296,7 @@ function playBuffer(ctx, out, buffer) {
   src.start();
 }
 
-// ---- Pad wiring ----------------------------------------------------------
+// ---- Pad DOM + triggering -----------------------------------------------
 
 function createPad(def, index) {
   const btn = document.createElement("button");
@@ -299,73 +308,69 @@ function createPad(def, index) {
     <span class="badge">custom</span>
     <span class="label">${def.label}</span>
   `;
-  if (customSamples[def.id]) btn.classList.add("custom");
   return btn;
 }
 
-async function triggerPad(def, btn) {
+function setPadCustom(btn, isCustom) {
+  btn.classList.toggle("custom", Boolean(isCustom));
+}
+
+async function triggerPad(def, btn, remoteSamples) {
   const ctx = getCtx();
   const master = ctx.createGain();
   master.gain.value = 0.9;
   master.connect(ctx.destination);
 
-  const custom = await ensureDecoded(def.id);
-  if (custom) {
-    playBuffer(ctx, master, custom);
-  } else {
-    def.synth(ctx, master);
+  const remote = remoteSamples[def.id];
+  let buffer = null;
+  if (remote && remote.url) {
+    buffer = await ensureDecoded(def.id, remote.url, remote.key || remote.url);
+  } else if (localSamples[def.id]) {
+    buffer = await ensureDecoded(
+      def.id,
+      localSamples[def.id],
+      "local:" + def.id,
+    );
   }
 
+  if (buffer) playBuffer(ctx, master, buffer);
+  else def.synth(ctx, master);
+
   btn.classList.add("is-playing");
-  // Re-trigger the animation even if the pad is already playing
   setTimeout(() => btn.classList.remove("is-playing"), 260);
 }
 
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
+// ---- Firebase-backed storage --------------------------------------------
+
+async function loadFirebaseModules() {
+  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
+  const [app, auth, storage, firestore] = await Promise.all([
+    import(`${base}/firebase-app.js`),
+    import(`${base}/firebase-auth.js`),
+    import(`${base}/firebase-storage.js`),
+    import(`${base}/firebase-firestore.js`),
+  ]);
+  return { app, auth, storage, firestore };
 }
 
-async function attachFileToPad(def, btn, file) {
-  if (!file || !file.type.startsWith("audio/")) return;
-  const dataURL = await readFileAsDataURL(file);
-  customSamples[def.id] = dataURL;
-  delete decoded[def.id];
-  try {
-    await ensureDecoded(def.id);
-  } catch {
-    // ignore; fallback to synth next time
-  }
-  saveCustomSamples(customSamples);
-  btn.classList.add("custom");
+function extensionForFile(file) {
+  const fromName = file.name && file.name.includes(".")
+    ? file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "")
+    : "";
+  if (fromName && fromName.length <= 5) return fromName;
+  const fromMime = (file.type || "").split("/")[1] || "";
+  return fromMime.replace(/[^a-z0-9]/g, "") || "bin";
 }
 
-function resetPad(def, btn) {
-  delete customSamples[def.id];
-  delete decoded[def.id];
-  saveCustomSamples(customSamples);
-  btn.classList.remove("custom");
-}
+// ---- App wiring ----------------------------------------------------------
 
-function init() {
-  const grid = document.getElementById("pad-grid");
-  const byKey = new Map();
+function initLocalOnlyMode(padRefs) {
+  const hint = document.getElementById("storage-hint");
+  hint.textContent =
+    "Running in local-only mode — drag-dropped sounds are saved to this browser only. Add your Firebase config to enable cloud sharing.";
 
-  PADS.forEach((def, i) => {
-    const btn = createPad(def, i);
-    grid.appendChild(btn);
-    if (KEYS[i]) byKey.set(KEYS[i], { def, btn });
-
-    btn.addEventListener("pointerdown", (ev) => {
-      ev.preventDefault();
-      triggerPad(def, btn);
-    });
-
-    btn.addEventListener("dblclick", () => resetPad(def, btn));
+  padRefs.forEach(({ def, btn }) => {
+    setPadCustom(btn, Boolean(localSamples[def.id]));
 
     btn.addEventListener("dragover", (ev) => {
       ev.preventDefault();
@@ -376,7 +381,272 @@ function init() {
       ev.preventDefault();
       btn.classList.remove("dragover");
       const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
-      await attachFileToPad(def, btn, file);
+      if (!file || !file.type.startsWith("audio/")) return;
+      const dataURL = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(r.error);
+        r.readAsDataURL(file);
+      });
+      localSamples[def.id] = dataURL;
+      decoded.delete(def.id);
+      saveLocalSamples();
+      setPadCustom(btn, true);
+    });
+
+    btn.addEventListener("dblclick", () => {
+      delete localSamples[def.id];
+      decoded.delete(def.id);
+      saveLocalSamples();
+      setPadCustom(btn, false);
+    });
+  });
+
+  return { getRemoteSamples: () => ({}) };
+}
+
+async function initFirebaseMode(padRefs) {
+  const hint = document.getElementById("storage-hint");
+  const authBar = document.getElementById("auth-bar");
+  const authStatus = document.getElementById("auth-status");
+  const authButton = document.getElementById("auth-button");
+  authBar.hidden = false;
+
+  let modules;
+  try {
+    modules = await loadFirebaseModules();
+  } catch (err) {
+    console.error("Failed to load Firebase SDK:", err);
+    hint.textContent =
+      "Could not load Firebase SDK — falling back to local-only mode.";
+    hint.classList.add("error");
+    authBar.hidden = true;
+    return initLocalOnlyMode(padRefs);
+  }
+
+  const { initializeApp } = modules.app;
+  const {
+    getAuth,
+    GoogleAuthProvider,
+    signInWithPopup,
+    signOut,
+    onAuthStateChanged,
+  } = modules.auth;
+  const { getStorage, ref: storageRef, uploadBytes, getDownloadURL, deleteObject } =
+    modules.storage;
+  const { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } =
+    modules.firestore;
+
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+  const storage = getStorage(fbApp);
+  const db = getFirestore(fbApp);
+  const provider = new GoogleAuthProvider();
+  const padsDoc = doc(db, PAD_DOC_PATH[0], PAD_DOC_PATH[1]);
+
+  let remoteSamples = {}; // id -> { url, path, key }
+  let currentUser = null;
+
+  function isOwner(user) {
+    if (!user) return false;
+    if (!ownerUid) return true; // unlocked: any signed-in user counts
+    return user.uid === ownerUid;
+  }
+
+  function renderAuth() {
+    if (!currentUser) {
+      authStatus.textContent = "Sign in to upload sounds";
+      authStatus.classList.remove("owner");
+      authButton.textContent = "Sign in";
+    } else if (isOwner(currentUser)) {
+      authStatus.textContent = `${currentUser.displayName || currentUser.email || "Owner"} — uploads enabled`;
+      authStatus.classList.add("owner");
+      authButton.textContent = "Sign out";
+    } else {
+      authStatus.textContent = `Signed in as ${currentUser.displayName || currentUser.email} (viewer)`;
+      authStatus.classList.remove("owner");
+      authButton.textContent = "Sign out";
+    }
+
+    padRefs.forEach(({ btn }) => {
+      btn.title = isOwner(currentUser)
+        ? "Drop an audio file to replace this pad"
+        : "Tap to play";
+    });
+  }
+
+  authButton.addEventListener("click", async () => {
+    try {
+      if (currentUser) await signOut(auth);
+      else await signInWithPopup(auth, provider);
+    } catch (err) {
+      console.error(err);
+      hint.textContent = `Auth error: ${err.message}`;
+      hint.classList.add("error");
+    }
+  });
+
+  onAuthStateChanged(auth, (user) => {
+    currentUser = user;
+    renderAuth();
+  });
+
+  onSnapshot(
+    padsDoc,
+    (snap) => {
+      const data = snap.exists() ? snap.data() : {};
+      const next = {};
+      Object.keys(data || {}).forEach((id) => {
+        const entry = data[id];
+        if (entry && entry.url) {
+          next[id] = { url: entry.url, path: entry.path || "", key: entry.key || entry.url };
+        }
+      });
+      remoteSamples = next;
+      padRefs.forEach(({ def, btn }) => {
+        const hasRemote = Boolean(remoteSamples[def.id]);
+        setPadCustom(btn, hasRemote || Boolean(localSamples[def.id]));
+        if (hasRemote) {
+          // Warm the decoder so the first tap is instant.
+          ensureDecoded(
+            def.id,
+            remoteSamples[def.id].url,
+            remoteSamples[def.id].key,
+          );
+        }
+      });
+    },
+    (err) => {
+      console.error("Firestore subscription failed:", err);
+      hint.textContent = `Could not load cloud sounds: ${err.message}`;
+      hint.classList.add("error");
+    },
+  );
+
+  async function uploadToPad(def, btn, file) {
+    if (!isOwner(currentUser)) {
+      hint.textContent = "Sign in as the owner to upload sounds.";
+      hint.classList.add("error");
+      return;
+    }
+    if (!file.type.startsWith("audio/")) {
+      hint.textContent = "Only audio files can be uploaded.";
+      hint.classList.add("error");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      hint.textContent = "File is larger than 5 MB. Trim it down first.";
+      hint.classList.add("error");
+      return;
+    }
+
+    btn.classList.add("uploading");
+    try {
+      const ext = extensionForFile(file);
+      const path = `pads/${def.id}-${Date.now()}.${ext}`;
+      const objectRef = storageRef(storage, path);
+      await uploadBytes(objectRef, file, { contentType: file.type });
+      const url = await getDownloadURL(objectRef);
+
+      // Delete the previous object, if any, to keep storage tidy.
+      const prev = remoteSamples[def.id];
+
+      await setDoc(
+        padsDoc,
+        {
+          [def.id]: {
+            url,
+            path,
+            key: path,
+            updatedAt: serverTimestamp(),
+            uploadedBy: currentUser.uid,
+          },
+        },
+        { merge: true },
+      );
+
+      if (prev && prev.path && prev.path !== path) {
+        deleteObject(storageRef(storage, prev.path)).catch((err) => {
+          console.warn("Could not delete previous sample:", err);
+        });
+      }
+
+      hint.textContent = `Uploaded "${file.name}" to ${def.label}.`;
+      hint.classList.remove("error");
+    } catch (err) {
+      console.error(err);
+      hint.textContent = `Upload failed: ${err.message}`;
+      hint.classList.add("error");
+    } finally {
+      btn.classList.remove("uploading");
+    }
+  }
+
+  async function resetPad(def, btn) {
+    if (!isOwner(currentUser)) return;
+    const prev = remoteSamples[def.id];
+    try {
+      await setDoc(padsDoc, { [def.id]: null }, { merge: true });
+      if (prev && prev.path) {
+        deleteObject(storageRef(storage, prev.path)).catch(() => {});
+      }
+      decoded.delete(def.id);
+    } catch (err) {
+      console.error(err);
+      hint.textContent = `Reset failed: ${err.message}`;
+      hint.classList.add("error");
+    }
+  }
+
+  padRefs.forEach(({ def, btn }) => {
+    btn.addEventListener("dragover", (ev) => {
+      if (!isOwner(currentUser)) return;
+      ev.preventDefault();
+      btn.classList.add("dragover");
+    });
+    btn.addEventListener("dragleave", () => btn.classList.remove("dragover"));
+    btn.addEventListener("drop", async (ev) => {
+      ev.preventDefault();
+      btn.classList.remove("dragover");
+      const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (!file) return;
+      await uploadToPad(def, btn, file);
+    });
+    btn.addEventListener("dblclick", () => resetPad(def, btn));
+  });
+
+  hint.textContent =
+    "Cloud mode active. Sign in as the owner, then drag an audio file onto any pad to upload it.";
+  hint.classList.remove("error");
+
+  return { getRemoteSamples: () => remoteSamples };
+}
+
+function init() {
+  const grid = document.getElementById("pad-grid");
+  const padRefs = PADS.map((def, i) => {
+    const btn = createPad(def, i);
+    grid.appendChild(btn);
+    return { def, btn };
+  });
+  const byKey = new Map();
+  padRefs.forEach(({ def, btn }, i) => {
+    if (KEYS[i]) byKey.set(KEYS[i], { def, btn });
+  });
+
+  const mode = isConfigured
+    ? initFirebaseMode(padRefs)
+    : Promise.resolve(initLocalOnlyMode(padRefs));
+
+  let getRemoteSamples = () => ({});
+  Promise.resolve(mode).then((api) => {
+    if (api && api.getRemoteSamples) getRemoteSamples = api.getRemoteSamples;
+  });
+
+  padRefs.forEach(({ def, btn }) => {
+    btn.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      triggerPad(def, btn, getRemoteSamples());
     });
   });
 
@@ -384,11 +654,8 @@ function init() {
     if (ev.repeat) return;
     const hit = byKey.get(ev.key);
     if (!hit) return;
-    triggerPad(hit.def, hit.btn);
+    triggerPad(hit.def, hit.btn, getRemoteSamples());
   });
-
-  // Warm up decoding for any saved samples
-  Object.keys(customSamples).forEach((id) => ensureDecoded(id));
 }
 
 document.addEventListener("DOMContentLoaded", init);
