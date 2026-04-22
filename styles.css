@@ -223,6 +223,40 @@ main {
   border-bottom-right-radius: inherit;
 }
 
+.pad .edit-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease,
+    transform 120ms ease;
+  z-index: 1;
+}
+
+.pad .edit-btn:hover {
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.55);
+  transform: scale(1.05);
+}
+
+.pad .edit-btn svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.pad.can-edit .edit-btn {
+  display: flex;
+}
+
 .pad.holding .hold-progress {
   animation: mj-hold-fill 5s linear forwards;
 }

@@ -324,12 +324,19 @@ function createPad(def, index) {
     <span class="badge">custom</span>
     <span class="label">${def.label}</span>
     <span class="hold-progress" aria-hidden="true"></span>
+    <span class="edit-btn" role="button" tabindex="-1" aria-label="Rename pad">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+    </span>
   `;
   return btn;
 }
 
 function setPadCustom(btn, isCustom) {
   btn.classList.toggle("custom", Boolean(isCustom));
+}
+
+function setPadEditable(btn, canEdit) {
+  btn.classList.toggle("can-edit", Boolean(canEdit));
 }
 
 function setPadLabel(btn, text) {
@@ -440,6 +447,7 @@ function initLocalOnlyMode(padRefs) {
   padRefs.forEach(({ def, btn }) => {
     setPadCustom(btn, Boolean(localSamples[def.id]));
     setPadLabel(btn, localLabels[def.id] || def.label);
+    setPadEditable(btn, true);
 
     btn.addEventListener("dragover", (ev) => {
       ev.preventDefault();
@@ -457,16 +465,12 @@ function initLocalOnlyMode(padRefs) {
       saveLocalSamples();
       setPadCustom(btn, true);
     });
-
-    btn.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      renameLocal(def, btn);
-    });
   });
 
   return {
     getRemoteSamples: () => ({}),
     resetPad: resetLocal,
+    renamePad: renameLocal,
     canEdit: () => true,
   };
 }
@@ -538,10 +542,12 @@ async function initFirebaseMode(padRefs) {
       authButton.textContent = "Sign out";
     }
 
+    const editable = isOwner(currentUser);
     padRefs.forEach(({ btn }) => {
-      btn.title = isOwner(currentUser)
+      btn.title = editable
         ? "Drop an audio file to replace this pad"
         : "Tap to play";
+      setPadEditable(btn, editable);
     });
   }
 
@@ -706,10 +712,6 @@ async function initFirebaseMode(padRefs) {
       if (!file) return;
       await uploadToPad(def, btn, file);
     });
-    btn.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      renamePad(def, btn);
-    });
   });
 
   hint.textContent =
@@ -719,6 +721,7 @@ async function initFirebaseMode(padRefs) {
   return {
     getRemoteSamples: () => remoteSamples,
     resetPad,
+    renamePad,
     canEdit: () => isOwner(currentUser),
   };
 }
@@ -742,15 +745,21 @@ function init() {
   let api = {
     getRemoteSamples: () => ({}),
     resetPad: () => {},
+    renamePad: () => {},
     canEdit: () => false,
   };
   Promise.resolve(mode).then((resolved) => {
     if (resolved) api = { ...api, ...resolved };
   });
 
+  const lastPointerType = new WeakMap(); // btn -> "mouse" | "touch" | "pen"
+
   padRefs.forEach(({ def, btn }) => {
+    const editBtn = btn.querySelector(".edit-btn");
+
     btn.addEventListener("pointerdown", (ev) => {
       ev.preventDefault();
+      lastPointerType.set(btn, ev.pointerType || "mouse");
       triggerPad(def, btn, api.getRemoteSamples());
       if (api.canEdit()) {
         startHold(btn, () => api.resetPad(def, btn));
@@ -760,6 +769,25 @@ function init() {
     btn.addEventListener("pointerup", stopHold);
     btn.addEventListener("pointerleave", stopHold);
     btn.addEventListener("pointercancel", stopHold);
+
+    // Desktop-only right-click rename. On touch, browsers fire contextmenu
+    // from long-press, which would collide with hold-to-reset.
+    btn.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      if (!api.canEdit()) return;
+      if (lastPointerType.get(btn) !== "mouse") return;
+      api.renamePad(def, btn);
+    });
+
+    // Pencil icon (shown for owner / in local mode) — works on touch too.
+    if (editBtn) {
+      editBtn.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+      editBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        if (api.canEdit()) api.renamePad(def, btn);
+      });
+    }
   });
 
   window.addEventListener("keydown", (ev) => {
