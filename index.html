@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MJ Sound Machine</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>MJ Sound Machine</h1>
+      <p class="subtitle">
+        Tap pads to play. Hold or mash several at once to layer them up.
+      </p>
+    </header>
+
+    <main>
+      <div id="pad-grid" class="pad-grid" aria-label="Sound pads"></div>
+
+      <section class="hint">
+        <p>
+          <strong>Tip:</strong> drag an audio file (.mp3, .wav, .ogg) onto any
+          pad to replace its sound. Double-click a pad to reset it. Sounds are
+          saved in this browser.
+        </p>
+        <p class="keys">
+          Keyboard: <kbd>1</kbd>-<kbd>9</kbd> <kbd>0</kbd> <kbd>-</kbd>
+          <kbd>=</kbd>
+        </p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

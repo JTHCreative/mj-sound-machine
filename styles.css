@@ -1,0 +1,190 @@
+:root {
+  --bg: #0b0b10;
+  --bg-2: #15151f;
+  --ink: #f5f3ef;
+  --muted: #8a8799;
+  --accent: #e9c46a;
+  --accent-2: #e76f51;
+  --pad: #1d1d2a;
+  --pad-edge: #2a2a3d;
+  --glow: rgba(233, 196, 106, 0.55);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: radial-gradient(
+      ellipse at top,
+      #1a1a28 0%,
+      var(--bg) 60%,
+      #05050a 100%
+    )
+    fixed;
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+header {
+  text-align: center;
+  padding: 2.5rem 1rem 1rem;
+}
+
+h1 {
+  font-size: clamp(1.8rem, 5vw, 2.6rem);
+  margin: 0;
+  letter-spacing: 0.02em;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0.5rem 0 0;
+  font-size: 0.95rem;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.pad-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .pad-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 380px) {
+  .pad-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.pad {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--pad-edge);
+  background: linear-gradient(160deg, var(--pad) 0%, #15151f 100%);
+  border-radius: 16px;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  font-size: clamp(0.85rem, 1.6vw, 1.05rem);
+  cursor: pointer;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.35rem;
+  transition: transform 80ms ease, box-shadow 180ms ease,
+    border-color 180ms ease;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+}
+
+.pad:hover {
+  border-color: var(--accent);
+}
+
+.pad:active,
+.pad.is-playing {
+  transform: translateY(1px) scale(0.98);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--glow), 0 10px 30px -10px var(--glow);
+}
+
+.pad.dragover {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 2px rgba(231, 111, 81, 0.5);
+}
+
+.pad .label {
+  font-size: clamp(0.9rem, 1.7vw, 1.05rem);
+  line-height: 1.1;
+}
+
+.pad .hint-key {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.pad .badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 0.65rem;
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
+.pad.custom .badge {
+  opacity: 1;
+}
+
+.pad::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle at 50% 120%,
+    var(--glow) 0%,
+    transparent 55%
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+
+.pad.is-playing::after {
+  opacity: 1;
+}
+
+.hint {
+  margin-top: 2rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.hint kbd {
+  background: var(--bg-2);
+  border: 1px solid var(--pad-edge);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  color: var(--ink);
+}
+
+.keys {
+  margin-top: 0.5rem;
+}
