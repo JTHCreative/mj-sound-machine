@@ -1,12 +1,16 @@
 // MJ Sound Machine — a grid of pads that play short synthesized sounds.
-// When Firebase is configured, the owner can upload audio to Cloud Storage
-// and all visitors hear the uploaded clips. Otherwise the app falls back to
-// saving drag-dropped files in localStorage for the current browser only.
+// When Firebase is configured, the owner can upload short audio clips that
+// are stored inline (base64) in Firestore so every visitor hears them.
+// Otherwise the app falls back to saving drag-dropped files in localStorage
+// for the current browser only.
 
 import { firebaseConfig, ownerUid, isConfigured } from "./firebase-config.js";
 
 const FIREBASE_VERSION = "10.12.0";
-const PAD_DOC_PATH = ["soundboard", "pads"]; // collection, doc
+const PADS_COLLECTION = "pads";
+// ~786 KB of raw audio fits in a 1 MiB Firestore doc after base64 inflation.
+// 500 KB gives comfortable headroom for JSON overhead.
+const MAX_UPLOAD_BYTES = 500 * 1024;
 
 const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
 
@@ -323,8 +327,8 @@ async function triggerPad(def, btn, remoteSamples) {
 
   const remote = remoteSamples[def.id];
   let buffer = null;
-  if (remote && remote.url) {
-    buffer = await ensureDecoded(def.id, remote.url, remote.key || remote.url);
+  if (remote && remote.source) {
+    buffer = await ensureDecoded(def.id, remote.source, remote.key);
   } else if (localSamples[def.id]) {
     buffer = await ensureDecoded(
       def.id,
@@ -342,24 +346,23 @@ async function triggerPad(def, btn, remoteSamples) {
 
 // ---- Firebase-backed storage --------------------------------------------
 
-async function loadFirebaseModules() {
-  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
-  const [app, auth, storage, firestore] = await Promise.all([
-    import(`${base}/firebase-app.js`),
-    import(`${base}/firebase-auth.js`),
-    import(`${base}/firebase-storage.js`),
-    import(`${base}/firebase-firestore.js`),
-  ]);
-  return { app, auth, storage, firestore };
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
 }
 
-function extensionForFile(file) {
-  const fromName = file.name && file.name.includes(".")
-    ? file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "")
-    : "";
-  if (fromName && fromName.length <= 5) return fromName;
-  const fromMime = (file.type || "").split("/")[1] || "";
-  return fromMime.replace(/[^a-z0-9]/g, "") || "bin";
+async function loadFirebaseModules() {
+  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
+  const [app, auth, firestore] = await Promise.all([
+    import(`${base}/firebase-app.js`),
+    import(`${base}/firebase-auth.js`),
+    import(`${base}/firebase-firestore.js`),
+  ]);
+  return { app, auth, firestore };
 }
 
 // ---- App wiring ----------------------------------------------------------
@@ -382,12 +385,7 @@ function initLocalOnlyMode(padRefs) {
       btn.classList.remove("dragover");
       const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
       if (!file || !file.type.startsWith("audio/")) return;
-      const dataURL = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result);
-        r.onerror = () => rej(r.error);
-        r.readAsDataURL(file);
-      });
+      const dataURL = await readFileAsDataURL(file);
       localSamples[def.id] = dataURL;
       decoded.delete(def.id);
       saveLocalSamples();
@@ -432,19 +430,23 @@ async function initFirebaseMode(padRefs) {
     signOut,
     onAuthStateChanged,
   } = modules.auth;
-  const { getStorage, ref: storageRef, uploadBytes, getDownloadURL, deleteObject } =
-    modules.storage;
-  const { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } =
-    modules.firestore;
+  const {
+    getFirestore,
+    collection,
+    doc,
+    onSnapshot,
+    setDoc,
+    deleteDoc,
+    serverTimestamp,
+  } = modules.firestore;
 
   const fbApp = initializeApp(firebaseConfig);
   const auth = getAuth(fbApp);
-  const storage = getStorage(fbApp);
   const db = getFirestore(fbApp);
   const provider = new GoogleAuthProvider();
-  const padsDoc = doc(db, PAD_DOC_PATH[0], PAD_DOC_PATH[1]);
+  const padsCol = collection(db, PADS_COLLECTION);
 
-  let remoteSamples = {}; // id -> { url, path, key }
+  let remoteSamples = {}; // id -> { source: dataUrl, key }
   let currentUser = null;
 
   function isOwner(user) {
@@ -492,14 +494,16 @@ async function initFirebaseMode(padRefs) {
   });
 
   onSnapshot(
-    padsDoc,
+    padsCol,
     (snap) => {
-      const data = snap.exists() ? snap.data() : {};
       const next = {};
-      Object.keys(data || {}).forEach((id) => {
-        const entry = data[id];
-        if (entry && entry.url) {
-          next[id] = { url: entry.url, path: entry.path || "", key: entry.key || entry.url };
+      snap.forEach((padDoc) => {
+        const data = padDoc.data();
+        if (data && data.dataUrl) {
+          next[padDoc.id] = {
+            source: data.dataUrl,
+            key: data.key || padDoc.id + ":" + (data.updatedAt?.seconds || ""),
+          };
         }
       });
       remoteSamples = next;
@@ -510,7 +514,7 @@ async function initFirebaseMode(padRefs) {
           // Warm the decoder so the first tap is instant.
           ensureDecoded(
             def.id,
-            remoteSamples[def.id].url,
+            remoteSamples[def.id].source,
             remoteSamples[def.id].key,
           );
         }
@@ -534,42 +538,24 @@ async function initFirebaseMode(padRefs) {
       hint.classList.add("error");
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      hint.textContent = "File is larger than 5 MB. Trim it down first.";
+    if (file.size > MAX_UPLOAD_BYTES) {
+      const kb = Math.round(MAX_UPLOAD_BYTES / 1024);
+      hint.textContent = `File is larger than ${kb} KB. Trim or re-encode it first.`;
       hint.classList.add("error");
       return;
     }
 
     btn.classList.add("uploading");
     try {
-      const ext = extensionForFile(file);
-      const path = `pads/${def.id}-${Date.now()}.${ext}`;
-      const objectRef = storageRef(storage, path);
-      await uploadBytes(objectRef, file, { contentType: file.type });
-      const url = await getDownloadURL(objectRef);
-
-      // Delete the previous object, if any, to keep storage tidy.
-      const prev = remoteSamples[def.id];
-
-      await setDoc(
-        padsDoc,
-        {
-          [def.id]: {
-            url,
-            path,
-            key: path,
-            updatedAt: serverTimestamp(),
-            uploadedBy: currentUser.uid,
-          },
-        },
-        { merge: true },
-      );
-
-      if (prev && prev.path && prev.path !== path) {
-        deleteObject(storageRef(storage, prev.path)).catch((err) => {
-          console.warn("Could not delete previous sample:", err);
-        });
-      }
+      const dataUrl = await readFileAsDataURL(file);
+      const key = String(Date.now());
+      await setDoc(doc(padsCol, def.id), {
+        dataUrl,
+        contentType: file.type,
+        key,
+        updatedAt: serverTimestamp(),
+        uploadedBy: currentUser.uid,
+      });
 
       hint.textContent = `Uploaded "${file.name}" to ${def.label}.`;
       hint.classList.remove("error");
@@ -582,14 +568,10 @@ async function initFirebaseMode(padRefs) {
     }
   }
 
-  async function resetPad(def, btn) {
+  async function resetPad(def) {
     if (!isOwner(currentUser)) return;
-    const prev = remoteSamples[def.id];
     try {
-      await setDoc(padsDoc, { [def.id]: null }, { merge: true });
-      if (prev && prev.path) {
-        deleteObject(storageRef(storage, prev.path)).catch(() => {});
-      }
+      await deleteDoc(doc(padsCol, def.id));
       decoded.delete(def.id);
     } catch (err) {
       console.error(err);
@@ -612,11 +594,11 @@ async function initFirebaseMode(padRefs) {
       if (!file) return;
       await uploadToPad(def, btn, file);
     });
-    btn.addEventListener("dblclick", () => resetPad(def, btn));
+    btn.addEventListener("dblclick", () => resetPad(def));
   });
 
   hint.textContent =
-    "Cloud mode active. Sign in as the owner, then drag an audio file onto any pad to upload it.";
+    "Cloud mode active. Sign in as the owner, then drag an audio file (under 500 KB) onto any pad to upload it.";
   hint.classList.remove("error");
 
   return { getRemoteSamples: () => remoteSamples };
