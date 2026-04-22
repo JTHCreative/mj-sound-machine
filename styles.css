@@ -211,6 +211,31 @@ main {
   opacity: 1;
 }
 
+.pad .hold-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: 0;
+  background: var(--accent-2);
+  pointer-events: none;
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+
+.pad.holding .hold-progress {
+  animation: mj-hold-fill 5s linear forwards;
+}
+
+@keyframes mj-hold-fill {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+
 .hint {
   margin-top: 2rem;
   text-align: center;

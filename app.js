@@ -244,25 +244,37 @@ const PADS = [
 
 // ---- Sample cache --------------------------------------------------------
 
-const LOCAL_KEY = "mj-sound-machine:samples:v1";
-const localSamples = loadLocalSamples(); // id -> dataURL (fallback mode only)
+const LOCAL_SAMPLES_KEY = "mj-sound-machine:samples:v1";
+const LOCAL_LABELS_KEY = "mj-sound-machine:labels:v1";
+const HOLD_RESET_MS = 5000;
+const localSamples = loadLocalJSON(LOCAL_SAMPLES_KEY); // id -> dataURL
+const localLabels = loadLocalJSON(LOCAL_LABELS_KEY); // id -> label
 const decoded = new Map(); // id -> { key, buffer }  (key invalidates on change)
 const pendingDecodes = new Map(); // id -> Promise
+const holdTimers = new WeakMap(); // btn -> timeoutId
 
-function loadLocalSamples() {
+function loadLocalJSON(key) {
   try {
-    return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}");
+    return JSON.parse(localStorage.getItem(key) || "{}");
   } catch {
     return {};
   }
 }
 
-function saveLocalSamples() {
+function saveLocalJSON(key, value) {
   try {
-    localStorage.setItem(LOCAL_KEY, JSON.stringify(localSamples));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch (err) {
-    console.warn("Could not persist sample to localStorage:", err);
+    console.warn(`Could not persist ${key}:`, err);
   }
+}
+
+function saveLocalSamples() {
+  saveLocalJSON(LOCAL_SAMPLES_KEY, localSamples);
+}
+
+function saveLocalLabels() {
+  saveLocalJSON(LOCAL_LABELS_KEY, localLabels);
 }
 
 async function decodeFromSource(source) {
@@ -311,12 +323,46 @@ function createPad(def, index) {
     <span class="hint-key">${KEYS[index] || ""}</span>
     <span class="badge">custom</span>
     <span class="label">${def.label}</span>
+    <span class="hold-progress" aria-hidden="true"></span>
   `;
   return btn;
 }
 
 function setPadCustom(btn, isCustom) {
   btn.classList.toggle("custom", Boolean(isCustom));
+}
+
+function setPadLabel(btn, text) {
+  const node = btn.querySelector(".label");
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+function startHold(btn, onFire) {
+  cancelHold(btn);
+  // Force-reflow so the progress animation restarts on rapid re-holds.
+  btn.classList.remove("holding");
+  void btn.offsetWidth;
+  btn.classList.add("holding");
+  const timer = setTimeout(() => {
+    cancelHold(btn);
+    onFire();
+  }, HOLD_RESET_MS);
+  holdTimers.set(btn, timer);
+}
+
+function cancelHold(btn) {
+  const t = holdTimers.get(btn);
+  if (t) clearTimeout(t);
+  holdTimers.delete(btn);
+  btn.classList.remove("holding");
+}
+
+function promptRename(currentLabel) {
+  const next = window.prompt("New label for this pad:", currentLabel);
+  if (next === null) return null;
+  const trimmed = next.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 40);
 }
 
 async function triggerPad(def, btn, remoteSamples) {
@@ -372,8 +418,28 @@ function initLocalOnlyMode(padRefs) {
   hint.textContent =
     "Running in local-only mode — drag-dropped sounds are saved to this browser only. Add your Firebase config to enable cloud sharing.";
 
+  function resetLocal(def, btn) {
+    delete localSamples[def.id];
+    delete localLabels[def.id];
+    decoded.delete(def.id);
+    saveLocalSamples();
+    saveLocalLabels();
+    setPadCustom(btn, false);
+    setPadLabel(btn, def.label);
+  }
+
+  function renameLocal(def, btn) {
+    const current = localLabels[def.id] || def.label;
+    const next = promptRename(current);
+    if (next === null || next === current) return;
+    localLabels[def.id] = next;
+    saveLocalLabels();
+    setPadLabel(btn, next);
+  }
+
   padRefs.forEach(({ def, btn }) => {
     setPadCustom(btn, Boolean(localSamples[def.id]));
+    setPadLabel(btn, localLabels[def.id] || def.label);
 
     btn.addEventListener("dragover", (ev) => {
       ev.preventDefault();
@@ -392,15 +458,17 @@ function initLocalOnlyMode(padRefs) {
       setPadCustom(btn, true);
     });
 
-    btn.addEventListener("dblclick", () => {
-      delete localSamples[def.id];
-      decoded.delete(def.id);
-      saveLocalSamples();
-      setPadCustom(btn, false);
+    btn.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      renameLocal(def, btn);
     });
   });
 
-  return { getRemoteSamples: () => ({}) };
+  return {
+    getRemoteSamples: () => ({}),
+    resetPad: resetLocal,
+    canEdit: () => true,
+  };
 }
 
 async function initFirebaseMode(padRefs) {
@@ -493,23 +561,33 @@ async function initFirebaseMode(padRefs) {
     renderAuth();
   });
 
+  const remoteLabels = {}; // id -> label string
+
   onSnapshot(
     padsCol,
     (snap) => {
-      const next = {};
+      const nextSamples = {};
+      const nextLabels = {};
       snap.forEach((padDoc) => {
-        const data = padDoc.data();
-        if (data && data.dataUrl) {
-          next[padDoc.id] = {
+        const data = padDoc.data() || {};
+        if (data.dataUrl) {
+          nextSamples[padDoc.id] = {
             source: data.dataUrl,
             key: data.key || padDoc.id + ":" + (data.updatedAt?.seconds || ""),
           };
         }
+        if (typeof data.label === "string" && data.label.trim()) {
+          nextLabels[padDoc.id] = data.label;
+        }
       });
-      remoteSamples = next;
+      remoteSamples = nextSamples;
+      Object.keys(remoteLabels).forEach((k) => delete remoteLabels[k]);
+      Object.assign(remoteLabels, nextLabels);
+
       padRefs.forEach(({ def, btn }) => {
         const hasRemote = Boolean(remoteSamples[def.id]);
         setPadCustom(btn, hasRemote || Boolean(localSamples[def.id]));
+        setPadLabel(btn, remoteLabels[def.id] || def.label);
         if (hasRemote) {
           // Warm the decoder so the first tap is instant.
           ensureDecoded(
@@ -549,13 +627,17 @@ async function initFirebaseMode(padRefs) {
     try {
       const dataUrl = await readFileAsDataURL(file);
       const key = String(Date.now());
-      await setDoc(doc(padsCol, def.id), {
-        dataUrl,
-        contentType: file.type,
-        key,
-        updatedAt: serverTimestamp(),
-        uploadedBy: currentUser.uid,
-      });
+      await setDoc(
+        doc(padsCol, def.id),
+        {
+          dataUrl,
+          contentType: file.type,
+          key,
+          updatedAt: serverTimestamp(),
+          uploadedBy: currentUser.uid,
+        },
+        { merge: true },
+      );
 
       hint.textContent = `Uploaded "${file.name}" to ${def.label}.`;
       hint.classList.remove("error");
@@ -568,14 +650,44 @@ async function initFirebaseMode(padRefs) {
     }
   }
 
-  async function resetPad(def) {
+  async function resetPad(def, btn) {
     if (!isOwner(currentUser)) return;
     try {
       await deleteDoc(doc(padsCol, def.id));
       decoded.delete(def.id);
+      setPadCustom(btn, false);
+      setPadLabel(btn, def.label);
     } catch (err) {
       console.error(err);
       hint.textContent = `Reset failed: ${err.message}`;
+      hint.classList.add("error");
+    }
+  }
+
+  async function renamePad(def, btn) {
+    if (!isOwner(currentUser)) {
+      hint.textContent = "Sign in as the owner to rename pads.";
+      hint.classList.add("error");
+      return;
+    }
+    const current = remoteLabels[def.id] || def.label;
+    const next = promptRename(current);
+    if (next === null || next === current) return;
+    try {
+      await setDoc(
+        doc(padsCol, def.id),
+        {
+          label: next,
+          updatedAt: serverTimestamp(),
+          uploadedBy: currentUser.uid,
+        },
+        { merge: true },
+      );
+      hint.textContent = `Renamed to "${next}".`;
+      hint.classList.remove("error");
+    } catch (err) {
+      console.error(err);
+      hint.textContent = `Rename failed: ${err.message}`;
       hint.classList.add("error");
     }
   }
@@ -594,14 +706,21 @@ async function initFirebaseMode(padRefs) {
       if (!file) return;
       await uploadToPad(def, btn, file);
     });
-    btn.addEventListener("dblclick", () => resetPad(def));
+    btn.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      renamePad(def, btn);
+    });
   });
 
   hint.textContent =
     "Cloud mode active. Sign in as the owner, then drag an audio file (under 500 KB) onto any pad to upload it.";
   hint.classList.remove("error");
 
-  return { getRemoteSamples: () => remoteSamples };
+  return {
+    getRemoteSamples: () => remoteSamples,
+    resetPad,
+    canEdit: () => isOwner(currentUser),
+  };
 }
 
 function init() {
@@ -620,23 +739,34 @@ function init() {
     ? initFirebaseMode(padRefs)
     : Promise.resolve(initLocalOnlyMode(padRefs));
 
-  let getRemoteSamples = () => ({});
-  Promise.resolve(mode).then((api) => {
-    if (api && api.getRemoteSamples) getRemoteSamples = api.getRemoteSamples;
+  let api = {
+    getRemoteSamples: () => ({}),
+    resetPad: () => {},
+    canEdit: () => false,
+  };
+  Promise.resolve(mode).then((resolved) => {
+    if (resolved) api = { ...api, ...resolved };
   });
 
   padRefs.forEach(({ def, btn }) => {
     btn.addEventListener("pointerdown", (ev) => {
       ev.preventDefault();
-      triggerPad(def, btn, getRemoteSamples());
+      triggerPad(def, btn, api.getRemoteSamples());
+      if (api.canEdit()) {
+        startHold(btn, () => api.resetPad(def, btn));
+      }
     });
+    const stopHold = () => cancelHold(btn);
+    btn.addEventListener("pointerup", stopHold);
+    btn.addEventListener("pointerleave", stopHold);
+    btn.addEventListener("pointercancel", stopHold);
   });
 
   window.addEventListener("keydown", (ev) => {
     if (ev.repeat) return;
     const hit = byKey.get(ev.key);
     if (!hit) return;
-    triggerPad(hit.def, hit.btn, getRemoteSamples());
+    triggerPad(hit.def, hit.btn, api.getRemoteSamples());
   });
 }
 
