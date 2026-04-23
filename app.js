@@ -17,6 +17,26 @@ const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
 // ---- Web Audio plumbing -------------------------------------------------
 
 let audioCtx = null;
+let sessionUnlocked = false;
+// Tiny silent MP3. Playing this via HTMLAudioElement on the first gesture
+// switches iOS Safari's audio session to a category that ignores the
+// ring/silent switch and persists across subsequent Web Audio calls.
+const SILENT_MP3 =
+  "data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+function unlockAudioSession() {
+  if (sessionUnlocked) return;
+  try {
+    const a = new Audio(SILENT_MP3);
+    a.volume = 0;
+    const p = a.play();
+    if (p && p.then) p.then(() => a.pause()).catch(() => {});
+  } catch {
+    // ignore
+  }
+  sessionUnlocked = true;
+}
+
 function getCtx() {
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -907,6 +927,7 @@ function init() {
 
     btn.addEventListener("pointerdown", (ev) => {
       ev.preventDefault();
+      unlockAudioSession();
       lastPointerType.set(btn, ev.pointerType || "mouse");
       triggerPad(def, btn, api.getRemoteSamples());
       if (!api.canEdit()) return;
@@ -955,8 +976,20 @@ function init() {
     if (ev.repeat) return;
     const hit = byKey.get(ev.key);
     if (!hit) return;
+    unlockAudioSession();
     triggerPad(hit.def, hit.btn, api.getRemoteSamples());
   });
+
+  // Fallback unlock: first touch anywhere on the page primes iOS Safari's
+  // audio session even if it lands on header/whitespace before a pad.
+  const firstTouch = () => {
+    unlockAudioSession();
+    getCtx();
+    document.removeEventListener("touchstart", firstTouch);
+    document.removeEventListener("pointerdown", firstTouch);
+  };
+  document.addEventListener("touchstart", firstTouch, { passive: true });
+  document.addEventListener("pointerdown", firstTouch);
 }
 
 document.addEventListener("DOMContentLoaded", init);
