@@ -22,7 +22,21 @@ function getCtx() {
     const AC = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AC();
   }
-  if (audioCtx.state === "suspended") audioCtx.resume();
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
+    // Safari keeps output silent until a sample plays, even after resume().
+    // Kick the pipeline with a one-sample zero buffer so the next scheduled
+    // audio is actually heard.
+    try {
+      const buf = audioCtx.createBuffer(1, 1, 22050);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      src.start(0);
+    } catch {
+      // some browsers may throw if called pre-gesture; harmless
+    }
+  }
   return audioCtx;
 }
 
